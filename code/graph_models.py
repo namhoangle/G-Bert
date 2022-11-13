@@ -214,6 +214,12 @@ class GATConv(MessagePassing):
     def forward(self, x, edge_index):
         """"""
         edge_index = add_self_loops(edge_index, num_nodes=x.size(0))
+        # begin: make it compatible with new version of torch-geometric 1.4.1
+        if len(edge_index) == 2 and edge_index[1] is None:
+            edge_index = edge_index[0]
+        # end
+
+
         x = torch.mm(x, self.weight).view(-1, self.heads, self.out_channels)
         return self.propagate('add', edge_index, x=x, num_nodes=x.size(0))
 

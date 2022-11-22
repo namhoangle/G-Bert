@@ -23,7 +23,7 @@ from tensorboardX import SummaryWriter
 from utils import metric_report, t2n, get_n_params
 from config import BertConfig
 from predictive_models import GBERT_Pretrain
-from sklearn.metrics import jaccard_similarity_score, f1_score, roc_auc_score, average_precision_score
+from sklearn.metrics import jaccard_score, f1_score, roc_auc_score, average_precision_score
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
@@ -149,13 +149,13 @@ class EHRDataset(Dataset):
 
         """extract input and output tokens
         """
-        random_word
+        # random_word
         input_tokens = []  # (2*max_len)
         input_tokens.extend(
             ['[CLS]'] + fill_to_max(list(adm[0]), self.seq_len - 1))
         input_tokens.extend(
             ['[CLS]'] + fill_to_max(list(adm[1]), self.seq_len - 1))
-
+        
         """convert tokens to id
         """
         input_ids = self.tokenizer.convert_tokens_to_ids(input_tokens)
@@ -379,6 +379,7 @@ def main():
             for _, batch in enumerate(prog_iter):
                 batch = tuple(t.to(device) for t in batch)
                 input_ids, dx_labels, rx_labels = batch
+                import pdb;pdb.set_trace()
                 loss, dx2dx, rx2dx, dx2rx, rx2rx = model(
                     input_ids, dx_labels, rx_labels)
                 # input_ids, dx_labels, rx_labels = input_ids.squeeze(

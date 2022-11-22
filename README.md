@@ -74,3 +74,30 @@ Many thanks to the open source repositories and libraries to speed up our coding
 - [pytorch_geometric](https://github.com/rusty1s/pytorch_geometric)
 
 
+## Installation
+* Install dependencies: 
+    * https://pytorch-geometric.readthedocs.io/en/latest/notes/installation.html
+    * `pip install torch-scatter torch-sparse torch-cluster torch-spline-conv torch-geometric==1.4.1 -f https://data.pyg.org/whl/torch-1.13.0+cpu.html`
+    
+* Fix `torch-geometric==1.4.1` lib: 
+    ```
+    # ../miniconda3/envs/env1/lib/python3.9/site-packages/torch_geometric/data/dataloader.py
+    ...
+    from torch._six import container_abcs, string_classes, int_classes
+    ...
+    ```
+    to 
+    ```
+    ...
+    from torch._six import string_classes
+    TORCH_MAJOR = int(torch.__version__.split('.')[0])
+    TORCH_MINOR = int(torch.__version__.split('.')[1])
+
+    if TORCH_MAJOR == 1 and TORCH_MINOR < 8:
+        from torch._six import container_abcs
+    else:
+        import collections.abc as container_abcs
+        int_classes = int
+    ...
+    ```
+

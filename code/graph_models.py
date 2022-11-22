@@ -219,7 +219,6 @@ class GATConv(MessagePassing):
             edge_index = edge_index[0]
         # end
 
-
         x = torch.mm(x, self.weight).view(-1, self.heads, self.out_channels)
         return self.propagate('add', edge_index, x=x, num_nodes=x.size(0))
 

@@ -95,3 +95,25 @@ class BertConfig(object):
     def to_json_string(self):
         """Serializes this instance to a JSON string."""
         return json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n"
+
+class GBertNoteConfig(BertConfig):
+    def __init__(self, vocab_size_or_config_json_file, 
+                hidden_size=300,
+                num_hidden_layers=2,
+                num_attention_heads=4,
+                intermediate_size=300,
+                hidden_act="relu",
+                hidden_dropout_prob=0.4,
+                attention_probs_dropout_prob=0.1,
+                max_position_embeddings=1,
+                type_vocab_size=2,
+                initializer_range=0.02,
+                graph=False,
+                graph_hidden_size=75,
+                graph_heads=4, 
+                mlp_input_dim=1024, 
+                mlp_hidden_dims=[512, 256, 64]):
+        super().__init__(self, vocab_size_or_config_json_file, hidden_size, num_hidden_layers, num_attention_heads, intermediate_size, hidden_act, hidden_dropout_prob, attention_probs_dropout_prob, max_position_embeddings, type_vocab_size, initializer_range, graph, graph_hidden_size, graph_heads)
+
+        self.mlp_input_dim = mlp_input_dim
+        self.mlp_hidden_dims = mlp_hidden_dims # include output_dim as last elem

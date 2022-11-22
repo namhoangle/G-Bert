@@ -20,8 +20,8 @@ from torch.optim import Adam
 from tensorboardX import SummaryWriter
 
 from utils import metric_report, t2n, get_n_params
-from config import BertConfig
-from predictive_models import GBERT_Predict
+from config import GBertNoteConfig
+from predictive_models import GBERTNotes_Predict
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
@@ -89,10 +89,11 @@ class EHRTokenizer(object):
 
 
 class EHRDataset(Dataset):
-    def __init__(self, data_pd, tokenizer: EHRTokenizer, max_seq_len):
+    def __init__(self, data_pd, tokenizer: EHRTokenizer, max_seq_len, notes_embs):
         self.data_pd = data_pd
         self.tokenizer = tokenizer
         self.seq_len = max_seq_len
+        self.notes_embs = notes_embs
 
         self.sample_counter = 0
 
@@ -106,7 +107,8 @@ class EHRDataset(Dataset):
                 item_df = data[data['SUBJECT_ID'] == subject_id]
                 patient = []
                 for _, row in item_df.iterrows():
-                    admission = [list(row['ICD9_CODE']), list(row['ATC4'])]
+                    adm_notes_emb = notes_embs[subject_id][row['HADM_ID']]
+                    admission = [list(row['ICD9_CODE']), list(row['ATC4']), adm_notes_emb]
                     patient.append(admission)
                 if len(patient) < 2:
                     continue
@@ -131,15 +133,17 @@ class EHRDataset(Dataset):
         """extract input and output tokens
         """
         input_tokens = []  # (2*max_len*adm)
+        input_embs = [] # (adm)
+
         output_dx_tokens = []  # (adm-1, l)
         output_rx_tokens = []  # (adm-1, l)
-
         for idx, adm in enumerate(self.records[subject_id]):
             input_tokens.extend(
                 ['[CLS]'] + fill_to_max(list(adm[0]), self.seq_len - 1))
             input_tokens.extend(
                 ['[CLS]'] + fill_to_max(list(adm[1]), self.seq_len - 1))
             # output_rx_tokens.append(list(adm[1]))
+            input_embs.append(adm[2])
 
             if idx != 0:
                 output_rx_tokens.append(list(adm[1]))
@@ -178,12 +182,18 @@ class EHRDataset(Dataset):
         assert len(output_dx_labels) == (len(self.records[subject_id]) - 1)
         # assert len(output_rx_labels) == len(self.records[subject_id])-1
 
-        cur_tensors = (torch.tensor(input_ids).view(-1, self.seq_len),
+        cur_tensors = (torch.tensor(input_ids).view(-1, self.seq_len), # (2*adm, seq_len)
+                       torch.tensor(input_embs), # (adm, emb_dim)
                        torch.tensor(output_dx_labels, dtype=torch.float),
                        torch.tensor(output_rx_labels, dtype=torch.float))
 
         return cur_tensors
 
+def load_notes_embs(path):
+    import pickle
+    with open(path, 'rb') as f:
+        dat = pickle.load(f)
+    return dat
 
 def load_dataset(args):
     data_dir = args.data_dir
@@ -194,6 +204,7 @@ def load_dataset(args):
 
     # load data
     data = pd.read_pickle(os.path.join(data_dir, 'data-multi-visit.pkl'))
+    notes_embs = load_notes_embs(os.path.join(data_dir, 'notes-embs.pkl'))
 
     # load trian, eval, test data
     ids_file = [os.path.join(data_dir, 'train-id.txt'),
@@ -212,7 +223,7 @@ def load_dataset(args):
                 ids.append(int(line.rstrip('\n')))
         return data[data['SUBJECT_ID'].isin(ids)].reset_index(drop=True)
 
-    return tokenizer, tuple(map(lambda x: EHRDataset(load_ids(data, x), tokenizer, max_seq_len), ids_file))
+    return tokenizer, tuple(map(lambda x: EHRDataset(load_ids(data, x), tokenizer, max_seq_len, notes_embs), ids_file))
 
 
 def main():
@@ -329,13 +340,16 @@ def main():
     # model = SeperateBertTransModel(config, tokenizer.dx_voc, tokenizer.rx_voc)
     if args.use_pretrain:
         logger.info("Use Pretraining model")
-        model = GBERT_Predict.from_pretrained(
+        model = GBERTNotes_Predict.from_pretrained(
             args.pretrain_dir, tokenizer=tokenizer, device=device)
     else:
-        config = BertConfig(
-            vocab_size_or_config_json_file=len(tokenizer.vocab.word2idx))
+        config = GBertNoteConfig(
+            vocab_size_or_config_json_file=len(tokenizer.vocab.word2idx), 
+            mlp_input_dim=1024, # TODO: get this from embedding info prior to training
+            mlp_hidden_dims=[512, 256])
+
         config.graph = args.graph
-        model = GBERT_Predict(config, tokenizer)
+        model = GBERTNotes_Predict(config, tokenizer)
     logger.info('# of model parameters: ' + str(get_n_params(model)))
 
     model.to(device)
@@ -384,10 +398,14 @@ def main():
             model.train()
             for _, batch in enumerate(prog_iter):
                 batch = tuple(t.to(device) for t in batch)
-                input_ids, dx_labels, rx_labels = batch
-                input_ids, dx_labels, rx_labels = input_ids.squeeze(
-                    dim=0), dx_labels.squeeze(dim=0), rx_labels.squeeze(dim=0)
-                loss, rx_logits = model(input_ids, dx_labels=dx_labels, rx_labels=rx_labels,
+                input_ids, input_embs, dx_labels, rx_labels = batch
+                # remove batch_size dim (which is 1)
+                input_ids, input_embs, dx_labels, rx_labels = \
+                                        input_ids.squeeze(dim=0),\
+                                        input_embs.squeeze(dim=0),\
+                                        dx_labels.squeeze(dim=0),\
+                                        rx_labels.squeeze(dim=0)
+                loss, rx_logits = model(input_ids, input_embs, dx_labels=dx_labels, rx_labels=rx_labels,
                                         epoch=global_step)
                 loss.backward()
 
@@ -414,12 +432,16 @@ def main():
                 rx_y_trues = []
                 for eval_input in tqdm(eval_dataloader, desc="Evaluating"):
                     eval_input = tuple(t.to(device) for t in eval_input)
-                    input_ids, dx_labels, rx_labels = eval_input
-                    input_ids, dx_labels, rx_labels = input_ids.squeeze(
-                    ), dx_labels.squeeze(), rx_labels.squeeze(dim=0)
+                    input_ids, input_embs, dx_labels, rx_labels = eval_input
+                    # remove batch_size dim (which is 1)
+                    input_ids, input_embs, dx_labels, rx_labels = \
+                                            input_ids.squeeze(dim=0),\
+                                            input_embs.squeeze(dim=0),\
+                                            dx_labels.squeeze(dim=0),\
+                                            rx_labels.squeeze(dim=0)
                     with torch.no_grad():
                         loss, rx_logits = model(
-                            input_ids, dx_labels=dx_labels, rx_labels=rx_labels)
+                            input_ids, input_embs, dx_labels=dx_labels, rx_labels=rx_labels)
                         rx_y_preds.append(t2n(torch.sigmoid(rx_logits)))
                         rx_y_trues.append(t2n(rx_labels))
                         # dx_y_preds.append(t2n(torch.sigmoid(dx_logits)))
@@ -464,12 +486,16 @@ def main():
             y_trues = []
             for test_input in tqdm(test_dataloader, desc="Testing"):
                 test_input = tuple(t.to(device) for t in test_input)
-                input_ids, dx_labels, rx_labels = test_input
-                input_ids, dx_labels, rx_labels = input_ids.squeeze(
-                ), dx_labels.squeeze(), rx_labels.squeeze(dim=0)
+                input_ids, input_embs, dx_labels, rx_labels = test_input
+                # remove batch_size dim (which is 1)
+                input_ids, input_embs, dx_labels, rx_labels = \
+                                        input_ids.squeeze(dim=0),\
+                                        input_embs.squeeze(dim=0),\
+                                        dx_labels.squeeze(dim=0),\
+                                        rx_labels.squeeze(dim=0)
                 with torch.no_grad():
                     loss, rx_logits = model(
-                        input_ids, dx_labels=dx_labels, rx_labels=rx_labels)
+                        input_ids, input_embs, dx_labels=dx_labels, rx_labels=rx_labels)
                     y_preds.append(t2n(torch.sigmoid(rx_logits)))
                     y_trues.append(t2n(rx_labels))
 

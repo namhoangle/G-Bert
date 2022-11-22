@@ -218,6 +218,9 @@ class PreTrainedBertModel(nn.Module):
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name, state_dict=None, cache_dir='', *inputs, **kwargs):
+        device = kwargs['device']
+        del kwargs['device']
+
         serialization_dir = os.path.join(cache_dir, pretrained_model_name)
         # Load config
         config_file = os.path.join(serialization_dir, CONFIG_NAME)
@@ -227,7 +230,7 @@ class PreTrainedBertModel(nn.Module):
         model = cls(config, *inputs, **kwargs)
         if state_dict is None:
             weights_path = os.path.join(serialization_dir, WEIGHTS_NAME)
-            state_dict = torch.load(weights_path)
+            state_dict = torch.load(weights_path, map_location=device)
 
         old_keys = []
         new_keys = []

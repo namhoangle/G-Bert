@@ -14,9 +14,10 @@ from torch import nn
 from torch.nn import CrossEntropyLoss, BCEWithLogitsLoss
 from torch.nn import LayerNorm
 import torch.nn.functional as F
-from config import BertConfig
+from config import BertConfig, GBertNoteConfig
 from bert_models import BERT, PreTrainedBertModel, BertLMPredictionHead, TransformerBlock, gelu
 import dill
+import torchvision 
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +88,10 @@ class SelfSupervisedHead(nn.Module):
     def forward(self, dx_inputs, rx_inputs):
         # inputs (B, hidden)
         # output logits
-        return self.multi_cls[0](dx_inputs), self.multi_cls[1](rx_inputs), self.multi_cls[2](dx_inputs), self.multi_cls[3](rx_inputs)
+        return self.multi_cls[0](dx_inputs), \
+                self.multi_cls[1](rx_inputs), \
+                self.multi_cls[2](dx_inputs), \
+                self.multi_cls[3](rx_inputs)
 
 
 class GBERT_Pretrain(PreTrainedBertModel):
@@ -103,7 +107,7 @@ class GBERT_Pretrain(PreTrainedBertModel):
         self.apply(self.init_bert_weights)
 
     def forward(self, inputs, dx_labels=None, rx_labels=None):
-        # inputs (B, 2, max_len)
+        # inputs (B, 2, max_len) # Size([64, 2, 55])
         # bert_pool (B, hidden)
         _, dx_bert_pool = self.bert(inputs[:, 0, :], torch.zeros(
             (inputs.size(0), inputs.size(2))).long().to(inputs.device))
@@ -234,3 +238,62 @@ class GBERT_Predict_Side(PreTrainedBertModel):
         return loss, rx_logits
 
 # ------------------------------------------------------------
+
+# ------- GBert + NoteEmbeddings --------------------
+
+class GBERTNotes_Predict(PreTrainedBertModel):
+    def __init__(self, config: GBertNoteConfig, tokenizer):
+        super(GBERT_Predict, self).__init__(config)
+        self.bert = BERT(config, tokenizer.dx_voc, tokenizer.rx_voc)
+        self.dense = nn.ModuleList([MappingHead(config), MappingHead(config)])
+        self.cls = nn.Sequential(nn.Linear(5*config.hidden_size, 3*config.hidden_size),
+                                 nn.ReLU(), nn.Linear(3*config.hidden_size, len(tokenizer.rx_voc_multi.word2idx)))
+        
+        mlp_hidden_dims = config.mlp_hidden_dims + [config.hidden_size]
+        self.mlp = torchvision.ops.MLP(config.mlp_input_dim, 
+                    mlp_hidden_dims, norm_layer=None, 
+                    activation_layer=nn.ReLU,
+                    bias=True, dropout=0.0) # no dropout
+
+        self.apply(self.init_bert_weights)
+
+    def forward(self, input_ids, notes_embs, dx_labels=None, rx_labels=None, epoch=None):
+        """
+        :param input_ids: [B, max_seq_len] where B = 2*adm
+        :param notes_embs: [adm, emb_dim]
+        :param rx_labels: [adm-1, rx_size]
+        :param dx_labels: [adm-1, dx_size]
+
+        :return:
+        """
+        token_types_ids = torch.cat([torch.zeros((1, input_ids.size(1))), torch.ones(
+            (1, input_ids.size(1)))], dim=0).long().to(input_ids.device)
+        token_types_ids = token_types_ids.repeat(
+            1 if input_ids.size(0)//2 == 0 else input_ids.size(0)//2, 1)
+        # bert_pool: (2*adm, H)
+        _, bert_pool = self.bert(input_ids, token_types_ids)
+        loss = 0
+        bert_pool = bert_pool.view(2, -1, bert_pool.size(1))  # (2, adm, H)
+        dx_bert_pool = self.dense[0](bert_pool[0])  # (adm, H)
+        rx_bert_pool = self.dense[1](bert_pool[1])  # (adm, H)
+        notes_embs = self.mlp(notes_embs) # (adm, H)
+
+        # mean and concat for rx prediction task
+        rx_logits = []
+        for i in range(rx_labels.size(0)):
+            # mean
+            dx_mean = torch.mean(dx_bert_pool[0:i+1, :], dim=0, keepdim=True)
+            rx_mean = torch.mean(rx_bert_pool[0:i+1, :], dim=0, keepdim=True)
+            notes_mean = torch.mean(notes_embs[0:i+1, :], dim=0, keepdim=True)
+            # concat
+            concat = torch.cat(
+                [ 
+                    dx_mean, rx_mean, notes_mean,
+                    dx_bert_pool[i+1, :].unsqueeze(dim=0), 
+                    notes_embs[i+1, :].unsqueeze(dim=0)
+                ], dim=-1)
+            rx_logits.append(self.cls(concat))
+
+        rx_logits = torch.cat(rx_logits, dim=0)
+        loss = F.binary_cross_entropy_with_logits(rx_logits, rx_labels)
+        return loss, rx_logits

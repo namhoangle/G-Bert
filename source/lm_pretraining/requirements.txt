@@ -1,0 +1,5 @@
+scispacy==0.1.0
+setuptools==40.6.3
+spacy==2.0.18
+stanfordcorenlp==3.9.1.1
+stanfordnlp==0.1.0

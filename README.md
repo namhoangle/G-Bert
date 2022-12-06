@@ -101,3 +101,31 @@ Many thanks to the open source repositories and libraries to speed up our coding
     ...
     ```
 
+
+```
+notes_splits_sort.isnull().sum()
+ROW_ID                             0
+CHARTDATE                          0
+CHARTTIME                      14683
+STORETIME                      14683
+CATEGORY                           0
+DESCRIPTION                        0
+CGID                           14683
+ISERROR                        14683
+TEXT                               0
+CHIEF_COMPLAINT                 1673
+PRESENT_ILLNESS                  204
+MEDICAL_HISTORY                  418
+MEDICATION_ADM                  1641
+ALLERGIES                      14683
+PHYSICAL_EXAM                  14683
+FAMILY_HISTORY                  1869
+SOCIAL_HISTORY                  1079
+PROCEDURE                       2186
+MEDICATION_DIS                 14683
+DIAGNOSIS_DIS                  14683
+CONDITION                       2140
+PERTINENT_RESULTS               2433
+HOSPITAL_COURSE                  515
+TEXT_WITHOUT_DIS_MEDICATION        0
+```

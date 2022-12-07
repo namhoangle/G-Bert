@@ -302,6 +302,7 @@ class GBERTNotes_Predict(PreTrainedBertModel):
         return loss, rx_logits
 
 
+
 class Notes_Predict(nn.Module):
     def __init__(self, config, tokenizer, mlp_input_dim=768, mlp_hidden_dims=[512, 256], num_gru_layers=3):
         super(Notes_Predict, self).__init__(config)
@@ -315,14 +316,39 @@ class Notes_Predict(nn.Module):
                     activation_layer=nn.ReLU,
                     bias=True, dropout=0.0) # no dropout
 
-        self.gen_rnn = torch.nn.GRU(
+        self.core_rnn = torch.nn.GRU(
             input_size=mlp_hidden_dims[-1], 
             hidden_size=config.hidden_dim, 
-            num_layers=num_gru_layers, # TODO
+            num_layers=num_gru_layers,
             batch_first=True
         )
 
-        self.apply(self.init_bert_weights)
+        self.linear_out = torch.nn.Linear(config.hidden_dim, len(tokenizer.rx_voc_multi.word2idx))
+
+        self.apply(self.init_weights)
+
+    def init_weights(self):
+        # Init weights
+        # Default weights of TensorFlow is Xavier Uniform for W and 1 or 0 for b
+        # Reference: 
+        # - https://www.tensorflow.org/api_docs/python/tf/compat/v1/get_variable
+        # - https://github.com/tensorflow/tensorflow/blob/v2.3.1/tensorflow/python/keras/layers/legacy_rnn/rnn_cell_impl.py#L484-L614
+        with torch.no_grad():
+            for name, param in self.core_rnn.named_parameters():
+                if 'weight_ih' in name:
+                    torch.nn.init.xavier_uniform_(param.data)
+                elif 'weight_hh' in name:
+                    torch.nn.init.xavier_uniform_(param.data)
+                elif 'bias_ih' in name:
+                    param.data.fill_(1)
+                elif 'bias_hh' in name:
+                    param.data.fill_(0)
+            for name, param in self.gen_linear.named_parameters():
+                if 'weight' in name:
+                    torch.nn.init.xavier_uniform_(param)
+                elif 'bias' in name:
+                    param.data.fill_(0)
+
 
     def forward(self, input_ids, notes_embs, dx_labels=None, rx_labels=None, epoch=None):
         """
@@ -333,18 +359,18 @@ class Notes_Predict(nn.Module):
 
         :return:
         """
-        token_types_ids = torch.cat([torch.zeros((1, input_ids.size(1))), torch.ones(
-            (1, input_ids.size(1)))], dim=0).long().to(input_ids.device)
-        token_types_ids = token_types_ids.repeat(
-            1 if input_ids.size(0)//2 == 0 else input_ids.size(0)//2, 1)
-        # bert_pool: (2*adm, H)
-        _, bert_pool = self.bert(input_ids, token_types_ids)
-        loss = 0
-        bert_pool = bert_pool.view(2, -1, bert_pool.size(1))  # (2, adm, H)
-        dx_bert_pool = self.dense[0](bert_pool[0])  # (adm, H)
-        rx_bert_pool = self.dense[1](bert_pool[1])  # (adm, H)
+        # token_types_ids = torch.cat([torch.zeros((1, input_ids.size(1))), torch.ones(
+        #     (1, input_ids.size(1)))], dim=0).long().to(input_ids.device)
+        # token_types_ids = token_types_ids.repeat(
+        #     1 if input_ids.size(0)//2 == 0 else input_ids.size(0)//2, 1)
+        # # bert_pool: (2*adm, H)
+        # _, bert_pool = self.bert(input_ids, token_types_ids)
+        # loss = 0
+        # bert_pool = bert_pool.view(2, -1, bert_pool.size(1))  # (2, adm, H)
+        # dx_bert_pool = self.dense[0](bert_pool[0])  # (adm, H)
+        # rx_bert_pool = self.dense[1](bert_pool[1])  # (adm, H)
         notes_embs = self.mlp(notes_embs) # (adm, H)
-
+        
         # mean and concat for rx prediction task
         rx_logits = []
         for i in range(rx_labels.size(0)):

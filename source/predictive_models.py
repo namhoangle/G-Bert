@@ -14,7 +14,7 @@ from torch import nn
 from torch.nn import CrossEntropyLoss, BCEWithLogitsLoss
 from torch.nn import LayerNorm
 import torch.nn.functional as F
-from config import BertConfig, GBertNoteConfig
+from config import BertConfig
 from bert_models import BERT, PreTrainedBertModel, BertLMPredictionHead, TransformerBlock, gelu
 import dill
 import torchvision 
@@ -242,13 +242,16 @@ class GBERT_Predict_Side(PreTrainedBertModel):
 # ------- GBert + NoteEmbeddings --------------------
 
 class GBERTNotes_Predict(PreTrainedBertModel):
-    def __init__(self, config: GBertNoteConfig, tokenizer):
-        super(GBERT_Predict, self).__init__(config)
+    def __init__(self, config: BertConfig, tokenizer, mlp_input_dim=768, mlp_hidden_dims=[256, 64]):
+        super(GBERTNotes_Predict, self).__init__(config)
         self.bert = BERT(config, tokenizer.dx_voc, tokenizer.rx_voc)
         self.dense = nn.ModuleList([MappingHead(config), MappingHead(config)])
         self.cls = nn.Sequential(nn.Linear(5*config.hidden_size, 3*config.hidden_size),
                                  nn.ReLU(), nn.Linear(3*config.hidden_size, len(tokenizer.rx_voc_multi.word2idx)))
-        
+
+        config.mlp_input_dim = mlp_input_dim
+        config.mlp_hidden_dims = mlp_hidden_dims
+
         mlp_hidden_dims = config.mlp_hidden_dims + [config.hidden_size]
         self.mlp = torchvision.ops.MLP(config.mlp_input_dim, 
                     mlp_hidden_dims, norm_layer=None, 
@@ -297,3 +300,143 @@ class GBERTNotes_Predict(PreTrainedBertModel):
         rx_logits = torch.cat(rx_logits, dim=0)
         loss = F.binary_cross_entropy_with_logits(rx_logits, rx_labels)
         return loss, rx_logits
+
+
+class Notes_Predict(nn.Module):
+    def __init__(self, config, tokenizer, mlp_input_dim=768, mlp_hidden_dims=[512, 256], num_gru_layers=3):
+        super(Notes_Predict, self).__init__(config)
+
+        config.mlp_input_dim = mlp_input_dim
+        config.mlp_hidden_dims = mlp_hidden_dims
+
+        mlp_hidden_dims = config.mlp_hidden_dims
+        self.mlp = torchvision.ops.MLP(config.mlp_input_dim, 
+                    mlp_hidden_dims, norm_layer=None, 
+                    activation_layer=nn.ReLU,
+                    bias=True, dropout=0.0) # no dropout
+
+        self.gen_rnn = torch.nn.GRU(
+            input_size=mlp_hidden_dims[-1], 
+            hidden_size=config.hidden_dim, 
+            num_layers=num_gru_layers, # TODO
+            batch_first=True
+        )
+
+        self.apply(self.init_bert_weights)
+
+    def forward(self, input_ids, notes_embs, dx_labels=None, rx_labels=None, epoch=None):
+        """
+        :param input_ids: [B, max_seq_len] where B = 2*adm
+        :param notes_embs: [adm, emb_dim]
+        :param rx_labels: [adm-1, rx_size]
+        :param dx_labels: [adm-1, dx_size]
+
+        :return:
+        """
+        token_types_ids = torch.cat([torch.zeros((1, input_ids.size(1))), torch.ones(
+            (1, input_ids.size(1)))], dim=0).long().to(input_ids.device)
+        token_types_ids = token_types_ids.repeat(
+            1 if input_ids.size(0)//2 == 0 else input_ids.size(0)//2, 1)
+        # bert_pool: (2*adm, H)
+        _, bert_pool = self.bert(input_ids, token_types_ids)
+        loss = 0
+        bert_pool = bert_pool.view(2, -1, bert_pool.size(1))  # (2, adm, H)
+        dx_bert_pool = self.dense[0](bert_pool[0])  # (adm, H)
+        rx_bert_pool = self.dense[1](bert_pool[1])  # (adm, H)
+        notes_embs = self.mlp(notes_embs) # (adm, H)
+
+        # mean and concat for rx prediction task
+        rx_logits = []
+        for i in range(rx_labels.size(0)):
+            # mean
+            dx_mean = torch.mean(dx_bert_pool[0:i+1, :], dim=0, keepdim=True)
+            rx_mean = torch.mean(rx_bert_pool[0:i+1, :], dim=0, keepdim=True)
+            notes_mean = torch.mean(notes_embs[0:i+1, :], dim=0, keepdim=True)
+            # concat
+            concat = torch.cat(
+                [ 
+                    dx_mean, rx_mean, notes_mean,
+                    dx_bert_pool[i+1, :].unsqueeze(dim=0), 
+                    notes_embs[i+1, :].unsqueeze(dim=0)
+                ], dim=-1)
+            rx_logits.append(self.cls(concat))
+
+        rx_logits = torch.cat(rx_logits, dim=0)
+        loss = F.binary_cross_entropy_with_logits(rx_logits, rx_labels)
+        return loss, rx_logits
+
+
+class GeneratorNetwork(torch.nn.Module):
+    """The generator network (encoder) for TimeGAN
+    """
+    def __init__(self, args):
+        super(GeneratorNetwork, self).__init__()
+        self.Z_dim = args.Z_dim
+        self.hidden_dim = args.hidden_dim
+        self.num_layers = args.num_layers
+        self.padding_value = args.padding_value
+        self.max_seq_len = args.max_seq_len
+
+        # Generator Architecture
+        self.gen_rnn = torch.nn.GRU(
+            input_size=self.Z_dim, 
+            hidden_size=self.hidden_dim, 
+            num_layers=self.num_layers, 
+            batch_first=True
+        )
+        self.gen_linear = torch.nn.Linear(self.hidden_dim, self.hidden_dim)
+        self.gen_sigmoid = torch.nn.Sigmoid()
+
+        # Init weights
+        # Default weights of TensorFlow is Xavier Uniform for W and 1 or 0 for b
+        # Reference: 
+        # - https://www.tensorflow.org/api_docs/python/tf/compat/v1/get_variable
+        # - https://github.com/tensorflow/tensorflow/blob/v2.3.1/tensorflow/python/keras/layers/legacy_rnn/rnn_cell_impl.py#L484-L614
+        with torch.no_grad():
+            for name, param in self.gen_rnn.named_parameters():
+                if 'weight_ih' in name:
+                    torch.nn.init.xavier_uniform_(param.data)
+                elif 'weight_hh' in name:
+                    torch.nn.init.xavier_uniform_(param.data)
+                elif 'bias_ih' in name:
+                    param.data.fill_(1)
+                elif 'bias_hh' in name:
+                    param.data.fill_(0)
+            for name, param in self.gen_linear.named_parameters():
+                if 'weight' in name:
+                    torch.nn.init.xavier_uniform_(param)
+                elif 'bias' in name:
+                    param.data.fill_(0)
+
+    def forward(self, Z, T):
+        """Takes in random noise (features) and generates synthetic features within the latent space
+        Args:
+            - Z: input random noise (B x S x Z)
+            - T: input temporal information
+        Returns:
+            - H: embeddings (B x S x E)
+        """
+        # Dynamic RNN input for ignoring paddings
+        Z_packed = torch.nn.utils.rnn.pack_padded_sequence(
+            input=Z, 
+            lengths=T, 
+            batch_first=True, 
+            enforce_sorted=False
+        )
+        
+        # 128 x 100 x 71
+        H_o, H_t = self.gen_rnn(Z_packed)
+        
+        # Pad RNN output back to sequence length
+        H_o, T = torch.nn.utils.rnn.pad_packed_sequence(
+            sequence=H_o, 
+            batch_first=True,
+            padding_value=self.padding_value,
+            total_length=self.max_seq_len
+        )
+
+        # 128 x 100 x 10
+        logits = self.gen_linear(H_o)
+        # B x S
+        H = self.gen_sigmoid(logits)
+        return H

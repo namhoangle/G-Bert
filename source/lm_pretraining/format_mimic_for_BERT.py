@@ -1,6 +1,5 @@
 # import psycopg2
 import pandas as pd
-import swifter
 import sys
 import spacy
 import re
@@ -91,7 +90,7 @@ def process_text(sent, note):
     if len(sent_text) > 0 and sent_text.strip() != '\n':
         if '\n' in sent_text:
             sent_text = sent_text.replace('\n', ' ')
-        note['text'] += sent_text + '\n'  
+        note['text'] += sent_text + '\n'
 
 def get_sentences(processed_section, note):
     # get sentences from spacy processing

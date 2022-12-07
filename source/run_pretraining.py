@@ -326,7 +326,7 @@ def main():
     if args.use_pretrain:
         logger.info("Use Pretraining model")
         model = GBERT_Pretrain.from_pretrained(args.pretrain_dir, dx_voc=tokenizer.dx_voc,
-                                               rx_voc=tokenizer.rx_voc)
+                                               rx_voc=tokenizer.rx_voc, device=device)
     else:
         config = BertConfig(
             vocab_size_or_config_json_file=len(tokenizer.vocab.word2idx))
@@ -379,7 +379,6 @@ def main():
             for _, batch in enumerate(prog_iter):
                 batch = tuple(t.to(device) for t in batch)
                 input_ids, dx_labels, rx_labels = batch
-                import pdb;pdb.set_trace()
                 loss, dx2dx, rx2dx, dx2rx, rx2rx = model(
                     input_ids, dx_labels, rx_labels)
                 # input_ids, dx_labels, rx_labels = input_ids.squeeze(

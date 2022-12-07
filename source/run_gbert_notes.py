@@ -20,7 +20,7 @@ from torch.optim import Adam
 from tensorboardX import SummaryWriter
 
 from utils import metric_report, t2n, get_n_params
-from config import GBertNoteConfig
+from config import BertConfig
 from predictive_models import GBERTNotes_Predict
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
@@ -107,7 +107,8 @@ class EHRDataset(Dataset):
                 item_df = data[data['SUBJECT_ID'] == subject_id]
                 patient = []
                 for _, row in item_df.iterrows():
-                    adm_notes_emb = notes_embs[subject_id][row['HADM_ID']]
+                    adm_notes_emb = notes_embs[(notes_embs['SUBJECT_ID'] == subject_id) 
+                                            & (notes_embs['HADM_ID'] == row['HADM_ID'])].embedding.values[0]
                     admission = [list(row['ICD9_CODE']), list(row['ATC4']), adm_notes_emb]
                     patient.append(admission)
                 if len(patient) < 2:
@@ -181,12 +182,13 @@ class EHRDataset(Dataset):
                                   2 * len(self.records[subject_id]))
         assert len(output_dx_labels) == (len(self.records[subject_id]) - 1)
         # assert len(output_rx_labels) == len(self.records[subject_id])-1
-
-        cur_tensors = (torch.tensor(input_ids).view(-1, self.seq_len), # (2*adm, seq_len)
-                       torch.tensor(input_embs), # (adm, emb_dim)
-                       torch.tensor(output_dx_labels, dtype=torch.float),
-                       torch.tensor(output_rx_labels, dtype=torch.float))
-
+        try:
+            cur_tensors = (torch.tensor(input_ids).view(-1, self.seq_len), # (2*adm, seq_len)
+                        torch.tensor(input_embs), # (adm, emb_dim)
+                        torch.tensor(output_dx_labels, dtype=torch.float),
+                        torch.tensor(output_rx_labels, dtype=torch.float))
+        except:
+            import pdb;pdb.set_trace()
         return cur_tensors
 
 def load_notes_embs(path):
@@ -204,7 +206,7 @@ def load_dataset(args):
 
     # load data
     data = pd.read_pickle(os.path.join(data_dir, 'data-multi-visit.pkl'))
-    notes_embs = load_notes_embs(os.path.join(data_dir, 'notes-embs.pkl'))
+    notes_embs = load_notes_embs(os.path.join(data_dir, 'notes_with_embeddings_full.df'))
 
     # load trian, eval, test data
     ids_file = [os.path.join(data_dir, 'train-id.txt'),
@@ -341,15 +343,16 @@ def main():
     if args.use_pretrain:
         logger.info("Use Pretraining model")
         model = GBERTNotes_Predict.from_pretrained(
-            args.pretrain_dir, tokenizer=tokenizer, device=device)
+            args.pretrain_dir, tokenizer=tokenizer, device=device, 
+            mlp_input_dim=768, # TODO: get this from embedding info prior to training
+            mlp_hidden_dims=[256, 64])
     else:
-        config = GBertNoteConfig(
-            vocab_size_or_config_json_file=len(tokenizer.vocab.word2idx), 
-            mlp_input_dim=1024, # TODO: get this from embedding info prior to training
-            mlp_hidden_dims=[512, 256])
-
+        config = BertConfig(
+            vocab_size_or_config_json_file=len(tokenizer.vocab.word2idx))
         config.graph = args.graph
-        model = GBERTNotes_Predict(config, tokenizer)
+        model = GBERTNotes_Predict(config, tokenizer,
+                    mlp_input_dim=768, # TODO: get this from embedding info prior to training
+                    mlp_hidden_dims=[256, 64])
     logger.info('# of model parameters: ' + str(get_n_params(model)))
 
     model.to(device)

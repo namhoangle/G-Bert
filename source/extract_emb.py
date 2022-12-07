@@ -5,6 +5,10 @@ import torch
 import spacy
 from spacy.language import Language
 from lm_pretraining.format_mimic_for_BERT import get_formatted_notes
+import dask.dataframe as dd
+import matplotlib; matplotlib.use('agg')
+import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 from transformers import AutoTokenizer, AutoModel
 
@@ -24,6 +28,7 @@ nlp.add_pipe("sbd_component", before='parser')
 
 
 SID, HID = 'SUBJECT_ID', 'HADM_ID'
+BKPID = 'BACKUP_HADM_ID'
 
 
 
@@ -40,6 +45,7 @@ def find_remove_and_backup_info(not_avail_df, source_data):
         all_hids = source_data[HID][source_data[SID] == sid]
         not_avail_hids = not_avail_df[HID][not_avail_df[SID] == sid]
         all_hids = sorted(all_hids)
+        not_avail_hids = sorted(not_avail_hids)
         # print(f'({sid}, {hids}) index of hid in sid: {hids.index(hid)}/{len(hids)}')
         # print(f'{len(not_avail_hids)}/{len(all_hids)}')
         if len(not_avail_hids) == len(all_hids):
@@ -62,7 +68,8 @@ def find_remove_and_backup_info(not_avail_df, source_data):
                 if left_backup is not None and not lag:
                     backups_info[(sid, hid)] = left_backup
                     continue
-
+                
+                lag = False
                 for bkp_hid in all_hids[hid_idx+1:]:
                     if bkp_hid not in not_avail_hids:
                         right_backup = bkp_hid
@@ -96,33 +103,115 @@ def join_data():
     not_avail = list(sub_adm_require.difference(sub_adm_avail))
     not_avail_df = pd.DataFrame.from_records(not_avail, columns=['SUBJECT_ID', 'HADM_ID'])
 
-
     data = data_multi_sort.join(notes_splits_sort, how='outer').reset_index()
     remove_sids, backup_sids = find_remove_and_backup_info(not_avail_df, data)
     
     data = data[~data[SID].isin(remove_sids)]
     backup_col = [backup_sids.get(tuple(data.iloc[i][[SID, HID]].tolist()), -1) for i in range(len(data))]
-    data['BACKUP_HADM_ID'] = backup_col
+    data[BKPID] = backup_col
 
     return data
 
-def load_df_or_run(savepath, func, *args):
+def load_df_or_run(savepath, func, *args, **kwargs):
     if Path(savepath).exists():
         data = pd.read_pickle(savepath)
     else:
-        data = func(*args)
+        data = func(*args, **kwargs)
         data.to_pickle(savepath)
+        print('saved to ', savepath)
     return data
 
 # savepath = '../data/final_preprocessed_data.df'
 # data = load_df_or_run(savepath, join_data)
 
-savepath = 'data_with_sents.df'
-formatted_data = load_df_or_run(savepath, get_formatted_notes, None, 'TEXT_WITHOUT_DIS_MEDICATION')
+savepath = '../data/data_with_sents.df'
+formatted_data = load_df_or_run(savepath,
+                    get_formatted_notes, None,
+                    'TEXT_WITHOUT_DIS_MEDICATION') 
+                    # output processed text at 'text' column
+
+# num sents
+def hist_sent_cnts(formatted_data):
+    def cnt_sent(row):
+        if not pd.isnull(row.text):
+            row['sents_cnt'] = len(row.text.split('\n'))
+        else:
+            row['sents_cnt'] = row.text
+        return row
+
+    formatted_data = formatted_data.apply(cnt_sent, axis=1)
+
+    sents_cnt = formatted_data['sents_cnt']
+    fig, ax = plt.subplots()
+    n, bins, patches = ax.hist(sents_cnt, edgecolor='black')
+    ax.set_title('Number of sentences')
+    plt.xticks(bins)
+    fig.savefig('../data/doc_sents_hist.png')
+    plt.show()
+
+##########
+
+cuda = torch.cuda.is_available()
+
+def get_embedding(row, tokenizer, model, pbar, num_chunks=10, max_sents=100, res_col='embedding'):
+    '''
+    num_chunks is the of chunks we want to split our document, each chunk will 
+    be fed into model for inference
+
+    max_sents is found by looking at histogram of number of sentences in the doc, 
+    pick the most popular value
+    '''
+    text = row.text
+    if pd.isnull(text): 
+        return row
+
+    sents = text.strip().split("\n")
+    chunk_len = max_sents // num_chunks
+    chunks = []
+    for i in range(num_chunks):
+        if i * chunk_len > len(sents): break
+        chunk = sents[i*chunk_len:(i+1)*chunk_len]
+        chunks.append("\n".join(chunk))
+    
+    with torch.no_grad():
+        encoded_input = tokenizer(chunks, max_length=128, truncation=True, 
+                        padding=True, add_special_tokens=True, return_tensors='pt')
+        if cuda:
+            encoded_input = {k:v.cuda() for k, v in encoded_input.items()}
+        output = model(**encoded_input)
+        chunk_emb = output.last_hidden_state[:, 0, :] #[10, 128, 768] take embedding at [CLS]
+        doc_emb = chunk_emb.mean(dim=0)
+        row[res_col] = doc_emb.cpu().numpy()
+    pbar.update(1)
+    return row
+
+savepath = '../data/notes_with_embeddings.df'
+if not Path(savepath).exists():
+    
+    tokenizer = AutoTokenizer.from_pretrained("emilyalsentzer/Bio_Discharge_Summary_BERT")
+    model = AutoModel.from_pretrained("emilyalsentzer/Bio_Discharge_Summary_BERT")
+    if cuda: model = model.cuda()
+    model.eval()
+
+    run_notes = formatted_data[[SID, HID, 'BACKUP_HADM_ID', 'text']]
+    pbar = tqdm(total=len(run_notes))
+
+    notes_with_embeddings = run_notes.apply(get_embedding, axis=1, args=(tokenizer, model, pbar))
+    notes_with_embeddings.to_pickle(savepath)
+else:
+    notes_with_embeddings = pd.read_pickle(savepath)
 
 
+# ddf = dd.from_pandas(run_notes, npartitions=5)
+# ddf_res = ddf.apply(get_embedding, axis=1, args=(tokenizer, model, pbar))
+# notes_embeddings = ddf_res.compute()
+def get_backup_embeddings(row, full_data):
+    if row['BACKUP_HADM_ID'] == -1:
+        return row
+    
+    row['embedding'] = full_data[(full_data[SID] == row[SID]) & (full_data[HID] == row['BACKUP_HADM_ID'])].iloc[0].embedding
+    return row
 
-tokenizer = AutoTokenizer.from_pretrained("emilyalsentzer/Bio_Discharge_Summary_BERT")
-model = AutoModel.from_pretrained("emilyalsentzer/Bio_Discharge_Summary_BERT")
-
-import pdb;pdb.set_trace()
+savepath = '../data/notes_with_embeddings_full.df'
+notes_with_embeddings_full = load_df_or_run(savepath, notes_with_embeddings.apply, 
+                            get_backup_embeddings, axis=1, args=(notes_with_embeddings,))

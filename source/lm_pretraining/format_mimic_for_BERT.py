@@ -18,7 +18,7 @@ from heuristic_tokenize import sent_tokenize_rules
 
 import dask.dataframe as dd
 
-# update these constants to run this script
+# update these constants to uncertainty_estimation.py this script
 OUTPUT_DIR = '../data/data-multi-visit-with-notes-sents.csv' #this path will contain tokenized notes. This dir will be the input dir for create_pretrain_data.sh
 MIMIC_NOTES_FILE = '../data/data-multi-visit-with-notes.csv' #this is the path to mimic data if you're reading from a csv. Else uncomment the code to read from database below
 
@@ -133,7 +133,7 @@ if __name__ == '__main__':
 
 
     # Uncomment this to use postgres to query mimic instead of reading from a file
-    # con = psycopg2.connect(dbname='mimic', host="/var/run/postgresql")
+    # con = psycopg2.connect(dbname='mimic', host="/var/uncertainty_estimation.py/postgresql")
     # notes_query = "(select * from mimiciii.noteevents);"
     # notes = pd.read_sql_query(notes_query, con)
     # notes = pd.read_csv(MIMIC_NOTES_FILE, index_col = 0)

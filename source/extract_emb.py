@@ -131,7 +131,7 @@ formatted_data = load_df_or_run(savepath,
                     # output processed text at 'text' column
 
 # num sents
-def hist_sent_cnts(formatted_data):
+def hist_sent_cnts(formatted_data, savepath='../data/doc_sents_hist.png'):
     def cnt_sent(row):
         if not pd.isnull(row.text):
             row['sents_cnt'] = len(row.text.split('\n'))
@@ -146,8 +146,10 @@ def hist_sent_cnts(formatted_data):
     n, bins, patches = ax.hist(sents_cnt, edgecolor='black')
     ax.set_title('Number of sentences')
     plt.xticks(bins)
-    fig.savefig('../data/doc_sents_hist.png')
+    fig.savefig(savepath)
     plt.show()
+
+# hist_sent_cnts(formatted_data)
 
 ##########
 
@@ -166,7 +168,7 @@ def get_embedding(row, tokenizer, model, pbar, num_chunks=10, max_sents=100, res
         return row
 
     sents = text.strip().split("\n")
-    chunk_len = max_sents // num_chunks
+    chunk_len = max_sents // num_chunks # 10 sents in one chunk
     chunks = []
     for i in range(num_chunks):
         if i * chunk_len > len(sents): break
@@ -176,6 +178,8 @@ def get_embedding(row, tokenizer, model, pbar, num_chunks=10, max_sents=100, res
     with torch.no_grad():
         encoded_input = tokenizer(chunks, max_length=128, truncation=True, 
                         padding=True, add_special_tokens=True, return_tensors='pt')
+        tokens = tokenizer.convert_ids_to_tokens(encoded_input['input_ids'])
+        
         if cuda:
             encoded_input = {k:v.cuda() for k, v in encoded_input.items()}
         output = model(**encoded_input)

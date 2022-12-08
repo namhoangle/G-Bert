@@ -222,6 +222,7 @@ def get_model_probs(model, rx_output_model_file, test_dataloader, device, args):
     logger.info("  Batch size = %d", 1)
 
     # Load a trained model that you have fine-tuned
+    print('Loading ', rx_output_model_file)
     model_state_dict = torch.load(rx_output_model_file, map_location=device)
     model.load_state_dict(model_state_dict)
     model.to(device)

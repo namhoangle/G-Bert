@@ -304,6 +304,7 @@ def main():
                         type=float,
                         help="Proportion of training to perform linear learning rate warmup for. "
                              "E.g., 0.1 = 10%% of training.")
+    parser.add_argument('--plot_notes_emb', action='store_true')
 
     args = parser.parse_args()
     args.output_dir = os.path.join(args.output_dir, args.model_name)
@@ -515,6 +516,37 @@ def main():
             return acc_container
 
         test(task=0)
+
+    if args.plot_notes_emb:
+
+        def plot_notes_emb(savepath, dataloader):
+            # Load a trained model that you have fine-tuned
+            model_state_dict = torch.load(rx_output_model_file, map_location=device)
+            model.load_state_dict(model_state_dict)
+            model.to(device)
+
+            model.eval()
+            note_embs_full = []
+            for test_input in tqdm(dataloader, desc="Plotting"):
+                test_input = tuple(t.to(device) for t in test_input)
+                input_ids, input_embs, dx_labels, rx_labels = test_input
+                # remove batch_size dim (which is 1)
+                input_ids, input_embs, dx_labels, rx_labels = \
+                                        input_ids.squeeze(dim=0),\
+                                        input_embs.squeeze(dim=0),\
+                                        dx_labels.squeeze(dim=0),\
+                                        rx_labels.squeeze(dim=0)
+                with torch.no_grad():
+                    note_embs = model.get_projected_note_embeddings(
+                        input_ids, input_embs, dx_labels=dx_labels, rx_labels=rx_labels)
+                    note_embs_full.append(note_embs)
+            
+
+        logger.info("***** Plotting projected notes embeddings *****")
+        logger.info("  Batch size = %d", 1)
+        plot_notes_emb('../data/projected_notes_embedding_train.png', train_dataloader)
+        plot_notes_emb('../data/projected_notes_embedding_test.png', test_dataloader)
+
 
 
 if __name__ == "__main__":

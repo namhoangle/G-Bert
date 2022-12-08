@@ -23,7 +23,7 @@ from tensorboardX import SummaryWriter
 
 from utils import metric_report, t2n, get_n_params
 from config import BertConfig
-from predictive_models import GBERT_Predict
+from predictive_models import GBERT_Predict, GBERTNotes_Predict
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
@@ -364,13 +364,9 @@ def main():
     # model = SeperateBertTransModel(config, tokenizer.dx_voc, tokenizer.rx_voc)
     
     logger.info("Loading ensembles...")
-    models = []
     model_dirs = glob(args.pattern)
-    # load template model 
-
     model = GBERT_Predict.from_pretrained(
         model_dirs[0], tokenizer=tokenizer, device=device)
-    models.append(model)
 
     logger.info('# of model parameters: ' + str(get_n_params(model)))
 
@@ -386,7 +382,7 @@ def main():
     
     models_probs = []
     for rx_output_model_file in rx_output_model_files:
-        model_probs, rx_y_trues = get_model_probs(rx_output_model_file, test_dataloader)
+        model_probs, rx_y_trues = get_model_probs(model, rx_output_model_file, test_dataloader, device, args)
         models_probs.append(model_probs)
     
     models_probs = np.asarray(models_probs)
